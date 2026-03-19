@@ -467,8 +467,9 @@ case class KeyedPartitioning(
    * Reduces this partitioning's partition keys by applying the given reducers.
    * Returns the distinct reduced keys.
    */
-  def reduceKeys(reducers: Seq[Option[Reducer[_, _]]]): Seq[InternalRowComparableWrapper] =
-    KeyedPartitioning.reduceKeys(partitionKeys, expressionDataTypes, reducers).distinct
+  def reduceKeys(reducers: Seq[Option[Reducer[_, _]]],
+      dataTypes: Seq[DataType]): Seq[InternalRowComparableWrapper] =
+    KeyedPartitioning.reduceKeys(partitionKeys, dataTypes, reducers).distinct
 
   override def satisfies0(required: Distribution): Boolean = {
     nonGroupedSatisfies(required) || groupedSatisfies(required)

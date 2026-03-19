@@ -45,6 +45,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * @param expectedPartitionKeys Optional sequence of expected partition key values and their
  *                              split counts
  * @param reducers Optional reducers to apply to partition keys for grouping compatibility
+ * @param reduceDataTypes Optional sequence of DataTypes to be used for grouping compatibility
  * @param distributePartitions When true, splits for a key are distributed across the expected
  *                             partitions (padding with empty partitions). When false, all splits
  *                             are replicated to every expected partition for that key.
@@ -54,6 +55,7 @@ case class GroupPartitionsExec(
     @transient joinKeyPositions: Option[Seq[Int]] = None,
     @transient expectedPartitionKeys: Option[Seq[(InternalRowComparableWrapper, Int)]] = None,
     @transient reducers: Option[Seq[Option[Reducer[_, _]]]] = None,
+    @transient reduceDataTypes: Option[Seq[DataType]] = None,
     @transient distributePartitions: Boolean = false
   ) extends UnaryExecNode {
 
@@ -142,7 +144,8 @@ case class GroupPartitionsExec(
 
     // Reduce keys if reducers are specified
     val reducedKeys = reducers.fold(projectedKeys)(
-      KeyedPartitioning.reduceKeys(projectedKeys, projectedDataTypes, _))
+      KeyedPartitioning.reduceKeys(projectedKeys,
+        reduceDataTypes.getOrElse(projectedDataTypes), _))
 
     val keyToPartitionIndices = reducedKeys.zipWithIndex.groupMap(_._1)(_._2)
 
@@ -153,7 +156,7 @@ case class GroupPartitionsExec(
     }
   }
 
-  @transient lazy val groupedPartitions: Seq[(InternalRowComparableWrapper, Seq[Int])] =
+  @transient private lazy val groupedPartitions: Seq[(InternalRowComparableWrapper, Seq[Int])] =
     groupedPartitionsTuple._1
 
   @transient lazy val isGrouped: Boolean = groupedPartitionsTuple._2

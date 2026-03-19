@@ -20,7 +20,7 @@ package org.apache.spark.sql.execution.exchange
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.internal.{LogKeys}
+import org.apache.spark.internal.LogKeys
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
@@ -31,6 +31,7 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 import org.apache.spark.sql.execution.joins.{ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.DataType
 
 /**
  * Ensures that the [[org.apache.spark.sql.catalyst.plans.physical.Partitioning Partitioning]]
@@ -272,7 +273,7 @@ case class EnsureRequirements(
             child match {
               case ShuffleExchangeExec(_, c, so, ps) =>
                 ShuffleExchangeExec(newPartitioning, c, so, ps)
-              case GroupPartitionsExec(c, _, _, _, _) => ShuffleExchangeExec(newPartitioning, c)
+              case GroupPartitionsExec(c, _, _, _, _, _) => ShuffleExchangeExec(newPartitioning, c)
               case _ => ShuffleExchangeExec(newPartitioning, child)
             }
           }
@@ -506,14 +507,15 @@ case class EnsureRequirements(
               |Right side # of partitions: $numRightPartKeys
               |""".stripMargin)
 
-        // in case of compatible but not identical partition expressions, we apply 'reduce'
-        // transforms to group one side's partitions as well as the common partition values
+        val reduceDataTypes = leftPartitioning.expressionDataTypes
         val leftReducers = leftSpec.reducers(rightSpec)
         val leftReducedKeys =
-          leftReducers.fold(leftPartitioning.partitionKeys)(leftPartitioning.reduceKeys)
+          leftReducers.fold(leftPartitioning.partitionKeys)(
+            leftPartitioning.reduceKeys(_, reduceDataTypes))
         val rightReducers = rightSpec.reducers(leftSpec)
         val rightReducedKeys =
-          rightReducers.fold(rightPartitioning.partitionKeys)(rightPartitioning.reduceKeys)
+          rightReducers.fold(rightPartitioning.partitionKeys)(
+            rightPartitioning.reduceKeys(_, reduceDataTypes))
 
         // merge values on both sides
         var mergedPartitionKeys =
@@ -630,9 +632,11 @@ case class EnsureRequirements(
 
         // Now we need to push-down the common partition information to the `GroupPartitionsExec`s.
         newLeft = applyGroupPartitions(left, leftSpec.joinKeyPositions, mergedPartitionKeys,
-          leftReducers, distributePartitions = applyPartialClustering && !replicateLeftSide)
+          leftReducers, reduceDataTypes,
+          distributePartitions = applyPartialClustering && !replicateLeftSide)
         newRight = applyGroupPartitions(right, rightSpec.joinKeyPositions, mergedPartitionKeys,
-          rightReducers, distributePartitions = applyPartialClustering && !replicateRightSide)
+          rightReducers, reduceDataTypes,
+          distributePartitions = applyPartialClustering && !replicateRightSide)
       }
     }
 
@@ -687,6 +691,7 @@ case class EnsureRequirements(
       joinKeyPositions: Option[Seq[Int]],
       mergedPartitionKeys: Seq[(InternalRowComparableWrapper, Int)],
       reducers: Option[Seq[Option[Reducer[_, _]]]],
+      reduceDataTypes: Seq[DataType],
       distributePartitions: Boolean): SparkPlan = {
     plan match {
       case g: GroupPartitionsExec =>
@@ -694,12 +699,13 @@ case class EnsureRequirements(
           joinKeyPositions = joinKeyPositions,
           expectedPartitionKeys = Some(mergedPartitionKeys),
           reducers = reducers,
+          reduceDataTypes = Some(reduceDataTypes),
           distributePartitions = distributePartitions)
         newGroupPartitions.copyTagsFrom(g)
         newGroupPartitions
       case _ =>
-        GroupPartitionsExec(plan, joinKeyPositions, Some(mergedPartitionKeys), reducers,
-          distributePartitions)
+        GroupPartitionsExec(plan, joinKeyPositions, Some(mergedPartitionKeys),
+          reducers, Some(reduceDataTypes), distributePartitions)
     }
   }
 
@@ -757,10 +763,10 @@ case class EnsureRequirements(
    * @param leftPartitionKeys left side partition keys
    * @param rightPartitionKeys right side partition keys
    * @param joinType join type for optional partition filtering
-   * @keyOrdering ordering to sort partition keys
+   * @param keyOrdering ordering to sort partition keys
    * @return merged and sorted partition values
    */
-  def mergePartitions(
+  private def mergePartitions(
       leftPartitionKeys: Seq[InternalRowComparableWrapper],
       rightPartitionKeys: Seq[InternalRowComparableWrapper],
       joinType: JoinType,
